@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import requests
 from dotenv import dotenv_values
 
 ROOT = Path(__file__).resolve().parent
@@ -138,6 +139,71 @@ def configure_credentials() -> None:
     print("凭证只写入本机 .env，.gitignore 会阻止它上传 GitHub。")
 
 
+def query_funds() -> None:
+    cfg = read_env()
+    address = cfg.get("ACCOUNT_ADDRESS", "").strip()
+    if not address:
+        print("请先在 3) 设置 Hyperliquid 主账户地址。")
+        return
+
+    network = cfg.get("NETWORK", "mainnet").strip().lower()
+    url = "https://api.hyperliquid.xyz/info" if network == "mainnet" else "https://api.hyperliquid-testnet.xyz/info"
+    dex = cfg.get("DEX", "xyz").strip()
+
+    payload = {
+        "type": "clearinghouseState",
+        "user": address,
+        "dex": dex,
+    }
+    r = requests.post(url, json=payload, timeout=15)
+    if r.status_code == 429:
+        print("查询被 Hyperliquid 限流（429），稍后再试。")
+        return
+    r.raise_for_status()
+    data = r.json()
+    summary = data.get("marginSummary") or {}
+
+    def num(key: str) -> float:
+        try:
+            return float(summary.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    account_value = num("accountValue")
+    margin_used = num("totalMarginUsed")
+    total_ntl = num("totalNtlPos")
+    try:
+        withdrawable = float(data.get("withdrawable", 0) or 0)
+    except (TypeError, ValueError):
+        withdrawable = 0.0
+
+    positions = []
+    for wrapper in data.get("assetPositions", []):
+        p = wrapper.get("position", {})
+        try:
+            szi = float(p.get("szi", 0) or 0)
+        except (TypeError, ValueError):
+            szi = 0.0
+        if abs(szi) > 1e-15:
+            positions.append((p.get("coin", "?"), szi, p.get("entryPx"), p.get("unrealizedPnl")))
+
+    print("\n" + "-" * 58)
+    print(f" Hyperliquid 资金查询 · DEX={dex}")
+    print("-" * 58)
+    print(f" 账户权益      : {account_value:.4f} USDC")
+    print(f" 已用保证金    : {margin_used:.4f} USDC")
+    print(f" 持仓名义价值  : {total_ntl:.4f} USDC")
+    print(f" 可提/可用金额 : {withdrawable:.4f} USDC")
+    if positions:
+        print(" 当前持仓:")
+        for coin, szi, entry, pnl in positions:
+            side = "LONG" if szi > 0 else "SHORT"
+            print(f"   {coin} | {side} | size={abs(szi)} | entry={entry} | uPnL={pnl}")
+    else:
+        print(" 当前持仓      : 无")
+    print("-" * 58)
+
+
 def switch_mode() -> None:
     cfg = read_env()
     dry_run = cfg.get("DRY_RUN", "true").lower() == "true"
@@ -202,6 +268,7 @@ def main() -> None:
         print(" 4) 切换 DRY RUN / LIVE")
         print(" 5) 设置做多 / 做空方向")
         print(" 6) 刷新状态")
+        print(" 7) 查询资金 / 当前持仓")
         print(" 0) 退出")
         choice = input("\n请选择: ").strip()
         try:
@@ -217,12 +284,14 @@ def main() -> None:
                 configure_direction()
             elif choice == "6":
                 continue
+            elif choice == "7":
+                query_funds()
             elif choice == "0":
                 print("已退出。")
                 return
             else:
                 print("无效选项。")
-        except (ValueError, OSError) as exc:
+        except (ValueError, OSError, requests.RequestException) as exc:
             print(f"操作失败：{exc}")
         input("\n按 Enter 返回菜单...")
 

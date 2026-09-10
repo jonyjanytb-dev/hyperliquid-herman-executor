@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Optional
 
 import requests
 
@@ -30,7 +31,7 @@ class HyperliquidMarketData:
         self.timeout = timeout
         self.session = requests.Session()
         self._cache: list[Candle] = []
-        self._last_success_minute: int | None = None
+        self._last_success_minute: Optional[int] = None
         self._retry_after_ms: int = 0
 
     def _request(self, start: int, end: int) -> list[Candle]:

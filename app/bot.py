@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import signal
 import time
+from datetime import datetime
+from statistics import fmean
 from typing import Optional
 
 from .config import Config
@@ -64,6 +66,47 @@ class TradingBot:
 
         return flat, pos.size
 
+    def _log_heartbeat(self, candles, position_size: float, has_signal: bool) -> None:
+        """Print one compact status line for every newly closed 1m candle."""
+        if not candles:
+            return
+        bar = candles[-1]
+        bar_time = datetime.fromtimestamp(bar.t / 1000).astimezone().strftime("%H:%M")
+        closes = [x.c for x in candles]
+
+        if len(closes) < self.cfg.sma200_length:
+            log.info(
+                "[%s] XYZ100=%.2f | SMA warmup %s/%s | 等待数据",
+                bar_time,
+                bar.c,
+                len(closes),
+                self.cfg.sma200_length,
+            )
+            return
+
+        sma50 = fmean(closes[-self.cfg.sma50_length:])
+        sma200 = fmean(closes[-self.cfg.sma200_length:])
+        separation = abs(sma50 - sma200) / self.cfg.point_size
+
+        if position_size > 0:
+            status = "持有 LONG"
+        elif position_size < 0:
+            status = "持有 SHORT"
+        elif has_signal:
+            status = "触发信号"
+        else:
+            status = "等待信号"
+
+        log.info(
+            "[%s] XYZ100=%.2f | SMA50=%.2f | SMA200=%.2f | Sep=%.2f | %s",
+            bar_time,
+            bar.c,
+            sma50,
+            sma200,
+            separation,
+            status,
+        )
+
     def process_once(self) -> bool:
         candles = self.market.fetch_recent(self.cfg.lookback_candles)
         if not candles:
@@ -93,6 +136,9 @@ class TradingBot:
         pos = self.executor.position()
         flat = pos.flat
         decision = self.strategy.evaluate(candles, self.state, flat)
+
+        # One heartbeat per newly closed candle, even when there is no trade signal.
+        self._log_heartbeat(candles, pos.size, decision is not None)
 
         if decision is not None:
             is_buy = decision.side == "LONG"

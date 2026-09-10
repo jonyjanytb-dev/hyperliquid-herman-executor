@@ -28,11 +28,34 @@ The original Pine source is included under `reference/`.
 
 `DRY_RUN=true` is the default. The program will not place live orders until you explicitly set `DRY_RUN=false` and provide credentials.
 
-## Run locally
+## Local interactive terminal (recommended)
+
+On macOS/Linux, after cloning the repository run:
+
+```bash
+git clone https://github.com/jonyjanytb-dev/hyperliquid-herman-executor.git
+cd hyperliquid-herman-executor
+bash run_local.sh
+```
+
+`run_local.sh` automatically creates `.venv`, installs dependencies, creates a local `.env` from `.env.example` when needed, and opens the interactive terminal.
+
+The terminal can:
+
+- start/stop the bot in the foreground
+- show current mode, market, position notional, leverage and estimated margin
+- edit `ORDER_NOTIONAL_USDC` and `LEVERAGE`
+- enter the Hyperliquid main account and API Wallet private key locally (private-key input is hidden)
+- switch between DRY RUN and LIVE with an explicit confirmation
+- enable/disable long or short execution
+
+The local `.env` is ignored by Git and should never be committed.
+
+## Run locally without the interactive terminal
 
 ```bash
 cp .env.example .env
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python main.py

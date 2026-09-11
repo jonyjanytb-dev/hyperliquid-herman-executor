@@ -9,6 +9,9 @@ from .config import Config
 
 log = logging.getLogger(__name__)
 
+PERP_MAX_DECIMALS = 6
+PRICE_SIGNIFICANT_FIGURES = 5
+
 
 @dataclass(frozen=True)
 class Position:
@@ -132,6 +135,11 @@ class HyperliquidExecutor(BaseExecutor):
         rounded = Decimal(str(size)).quantize(q, rounding=ROUND_DOWN)
         return float(rounded)
 
+    def _round_price(self, price: float) -> float:
+        """Normalize a perp price to Hyperliquid's accepted tick precision."""
+        significant = float(f"{price:.{PRICE_SIGNIFICANT_FIGURES}g}")
+        return round(significant, PERP_MAX_DECIMALS - self.sz_decimals)
+
     def _mids(self) -> dict:
         return self.info.all_mids(self.cfg.dex)
 
@@ -186,11 +194,12 @@ class HyperliquidExecutor(BaseExecutor):
         size = self._round_size(abs(position_size))
         if size <= 0:
             raise RuntimeError("Position size rounded to zero while creating protection")
+        trigger_px = self._round_price(trigger_px)
         order_type = {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": kind}}
-        return is_buy, size, order_type
+        return is_buy, size, trigger_px, order_type
 
     def _trigger_order(self, position_size: float, trigger_px: float, kind: str) -> Optional[int]:
-        is_buy, size, order_type = self._trigger_payload(position_size, trigger_px, kind)
+        is_buy, size, trigger_px, order_type = self._trigger_payload(position_size, trigger_px, kind)
         resp = self.exchange.order(
             self.cfg.coin,
             is_buy,
@@ -205,6 +214,7 @@ class HyperliquidExecutor(BaseExecutor):
         oid = self._extract_oid(resp)
         if oid is None:
             raise RuntimeError(f"Failed to create {kind.upper()} trigger order: {resp}")
+        log.info("%s trigger placed oid=%s px=%s size=%s", kind.upper(), oid, trigger_px, size)
         return oid
 
     def place_protection(self, position_size: float, tp: float, sl: float):
@@ -230,7 +240,7 @@ class HyperliquidExecutor(BaseExecutor):
             log.info("Dynamic TP created oid=%s px=%.4f", oid, tp)
             return oid
 
-        is_buy, size, order_type = self._trigger_payload(position_size, tp, "tp")
+        is_buy, size, tp, order_type = self._trigger_payload(position_size, tp, "tp")
         try:
             resp = self.exchange.modify_order(
                 int(old_tp_oid),

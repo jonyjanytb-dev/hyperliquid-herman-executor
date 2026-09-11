@@ -72,13 +72,16 @@ class DryRunExecutor(BaseExecutor):
 
     def place_protection(self, position_size: float, tp: float, sl: float):
         self._tp, self._sl = tp, sl
-        self._tp_oid, self._sl_oid = self._next_oid(), self._next_oid()
-        log.info("DRY RUN protection TP=%.4f SL=%.4f", tp, sl)
+        self._sl_oid, self._tp_oid = self._next_oid(), self._next_oid()
+        log.info("DRY RUN protection SL=%.4f TP=%.4f", sl, tp)
         return self._tp_oid, self._sl_oid
 
     def update_tp(self, position_size: float, old_tp_oid: Optional[int], tp: float):
         self._tp = tp
-        self._tp_oid = self._next_oid()
+        if old_tp_oid is None:
+            self._tp_oid = self._next_oid()
+        else:
+            self._tp_oid = old_tp_oid
         log.info("DRY RUN update TP=%.4f", tp)
         return self._tp_oid
 
@@ -168,10 +171,26 @@ class HyperliquidExecutor(BaseExecutor):
             pass
         return None
 
-    def _trigger_order(self, position_size: float, trigger_px: float, kind: str) -> Optional[int]:
+    @staticmethod
+    def _extract_error(resp: dict) -> Optional[str]:
+        try:
+            status = resp["response"]["data"]["statuses"][0]
+            if "error" in status:
+                return str(status["error"])
+        except Exception:
+            pass
+        return None
+
+    def _trigger_payload(self, position_size: float, trigger_px: float, kind: str):
         is_buy = position_size < 0
         size = self._round_size(abs(position_size))
+        if size <= 0:
+            raise RuntimeError("Position size rounded to zero while creating protection")
         order_type = {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": kind}}
+        return is_buy, size, order_type
+
+    def _trigger_order(self, position_size: float, trigger_px: float, kind: str) -> Optional[int]:
+        is_buy, size, order_type = self._trigger_payload(position_size, trigger_px, kind)
         resp = self.exchange.order(
             self.cfg.coin,
             is_buy,
@@ -180,24 +199,68 @@ class HyperliquidExecutor(BaseExecutor):
             order_type,
             reduce_only=True,
         )
+        error = self._extract_error(resp)
+        if error:
+            raise RuntimeError(f"Failed to create {kind.upper()} trigger order: {error}")
         oid = self._extract_oid(resp)
         if oid is None:
             raise RuntimeError(f"Failed to create {kind.upper()} trigger order: {resp}")
         return oid
 
     def place_protection(self, position_size: float, tp: float, sl: float):
-        tp_oid = self._trigger_order(position_size, tp, "tp")
+        # Protect downside first. If TP placement fails, keep the SL alive so the
+        # live position is never deliberately left without a stop.
+        sl_oid = self._trigger_order(position_size, sl, "sl")
         try:
-            sl_oid = self._trigger_order(position_size, sl, "sl")
+            tp_oid = self._trigger_order(position_size, tp, "tp")
         except Exception:
-            self.cancel_oid(tp_oid)
+            log.exception("TP placement failed after SL was placed; keeping SL oid=%s", sl_oid)
             raise
         return tp_oid, sl_oid
 
     def update_tp(self, position_size: float, old_tp_oid: Optional[int], tp: float):
-        if old_tp_oid is not None:
+        """Move Dynamic TP without first deleting the working TP.
+
+        Preferred path is an in-place Hyperliquid order modification. If the
+        previous TP no longer exists, create the replacement first and only then
+        try to cancel the stale oid. This avoids the old cancel-then-create gap.
+        """
+        if old_tp_oid is None:
+            oid = self._trigger_order(position_size, tp, "tp")
+            log.info("Dynamic TP created oid=%s px=%.4f", oid, tp)
+            return oid
+
+        is_buy, size, order_type = self._trigger_payload(position_size, tp, "tp")
+        try:
+            resp = self.exchange.modify_order(
+                int(old_tp_oid),
+                self.cfg.coin,
+                is_buy,
+                size,
+                tp,
+                order_type,
+                reduce_only=True,
+            )
+            error = self._extract_error(resp)
+            if error:
+                raise RuntimeError(error)
+            new_oid = self._extract_oid(resp) or int(old_tp_oid)
+            log.info("Dynamic TP modified oid=%s px=%.4f", new_oid, tp)
+            return new_oid
+        except Exception as exc:
+            log.warning(
+                "Dynamic TP modify failed for oid=%s (%s); creating replacement before cancel",
+                old_tp_oid,
+                exc,
+            )
+
+        # Fallback: create the new protection first, so a failed replacement
+        # cannot leave the position without any TP.
+        new_oid = self._trigger_order(position_size, tp, "tp")
+        if new_oid != old_tp_oid:
             self.cancel_oid(old_tp_oid)
-        return self._trigger_order(position_size, tp, "tp")
+        log.info("Dynamic TP replaced old_oid=%s new_oid=%s px=%.4f", old_tp_oid, new_oid, tp)
+        return new_oid
 
     def cancel_oid(self, oid: Optional[int]) -> None:
         if oid is None:

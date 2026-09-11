@@ -30,7 +30,16 @@ class TradingBot:
     def stop(self, *_):
         self.running = False
 
-    def _sync_position_state(self, bar_time: int) -> tuple[bool, float]:
+    def _dynamic_tp_from_candles(self, candles) -> Optional[float]:
+        if self.cfg.tp_mode != "200 SMA" or self.cfg.sma_target_behaviour != "Dynamic":
+            return None
+        if len(candles) < self.cfg.sma200_length:
+            return None
+        closes = [x.c for x in candles]
+        return fmean(closes[-self.cfg.sma200_length:])
+
+    def _sync_position_state(self, candles) -> tuple[bool, float]:
+        bar_time = candles[-1].t
         pos = self.executor.position()
         flat = pos.flat
 
@@ -50,11 +59,32 @@ class TradingBot:
         # Restart recovery: live position exists while local state is empty.
         elif self.state.active_side == 0 and not flat:
             tp_oid, tp_px, sl_oid, sl_px = self.executor.recover_protection()
-            if tp_px is None or sl_px is None:
+
+            # Fail closed if there is no stop. We deliberately do not synthesize
+            # a new SL here because its correct historical reference may be unknown.
+            if sl_px is None:
                 raise RuntimeError(
-                    "Existing position detected but its TP/SL could not be recovered. "
-                    "Refusing to issue new trades; restore/correct protective orders first."
+                    "Existing position detected but its SL could not be recovered. "
+                    "Refusing to manage or issue new trades until a stop is restored."
                 )
+
+            # Dynamic 200-SMA TP is fully reconstructable from current closed bars.
+            # If it disappeared while the bot was stopped/restarted, restore it.
+            if tp_px is None:
+                dynamic_tp = self._dynamic_tp_from_candles(candles)
+                if dynamic_tp is None:
+                    raise RuntimeError(
+                        "Existing position detected but its TP could not be recovered, "
+                        "and Dynamic 200-SMA TP is not available to rebuild it."
+                    )
+                tp_oid = self.executor.update_tp(pos.size, None, dynamic_tp)
+                tp_px = dynamic_tp
+                log.warning(
+                    "Recovered live position had no TP; restored Dynamic 200-SMA TP=%.4f oid=%s",
+                    dynamic_tp,
+                    tp_oid,
+                )
+
             self.state.active_side = 1 if pos.size > 0 else -1
             self.state.active_entry = pos.entry_px
             self.state.active_tp_at_entry = tp_px
@@ -118,7 +148,7 @@ class TradingBot:
         if isinstance(self.executor, DryRunExecutor):
             self.executor.set_mid(bar.c)
 
-        flat, position_size = self._sync_position_state(bar.t)
+        flat, position_size = self._sync_position_state(candles)
 
         # Dynamic 200-SMA target follows the current closed-bar SMA200 while trade is open.
         if not flat and self.state.active_side != 0:

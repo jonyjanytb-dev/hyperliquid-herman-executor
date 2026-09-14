@@ -150,57 +150,90 @@ def query_funds() -> None:
     url = "https://api.hyperliquid.xyz/info" if network == "mainnet" else "https://api.hyperliquid-testnet.xyz/info"
     dex = cfg.get("DEX", "xyz").strip()
 
-    payload = {
-        "type": "clearinghouseState",
-        "user": address,
-        "dex": dex,
-    }
-    r = requests.post(url, json=payload, timeout=15)
-    if r.status_code == 429:
-        print("查询被 Hyperliquid 限流（429），稍后再试。")
-        return
-    r.raise_for_status()
-    data = r.json()
-    summary = data.get("marginSummary") or {}
+    def post_info(payload: dict) -> dict:
+        r = requests.post(url, json=payload, timeout=15)
+        if r.status_code == 429:
+            raise RuntimeError("查询被 Hyperliquid 限流（429），稍后再试。")
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Hyperliquid 返回了异常数据：{data}")
+        return data
 
-    def num(key: str) -> float:
+    def safe_float(value) -> float:
         try:
-            return float(summary.get(key, 0) or 0)
+            return float(value or 0)
         except (TypeError, ValueError):
             return 0.0
 
-    account_value = num("accountValue")
-    margin_used = num("totalMarginUsed")
-    total_ntl = num("totalNtlPos")
-    try:
-        withdrawable = float(data.get("withdrawable", 0) or 0)
-    except (TypeError, ValueError):
-        withdrawable = 0.0
+    def print_perp_state(title: str, data: dict) -> None:
+        summary = data.get("marginSummary") or {}
+        account_value = safe_float(summary.get("accountValue"))
+        margin_used = safe_float(summary.get("totalMarginUsed"))
+        total_ntl = safe_float(summary.get("totalNtlPos"))
+        withdrawable = safe_float(data.get("withdrawable"))
 
-    positions = []
-    for wrapper in data.get("assetPositions", []):
-        p = wrapper.get("position", {})
-        try:
-            szi = float(p.get("szi", 0) or 0)
-        except (TypeError, ValueError):
-            szi = 0.0
-        if abs(szi) > 1e-15:
-            positions.append((p.get("coin", "?"), szi, p.get("entryPx"), p.get("unrealizedPnl")))
+        positions = []
+        for wrapper in data.get("assetPositions", []):
+            p = wrapper.get("position", {})
+            szi = safe_float(p.get("szi"))
+            if abs(szi) > 1e-15:
+                positions.append((p.get("coin", "?"), szi, p.get("entryPx"), p.get("unrealizedPnl")))
+
+        print(f"\n {title}")
+        print(f" 账户权益      : {account_value:.4f} USDC")
+        print(f" 已用保证金    : {margin_used:.4f} USDC")
+        print(f" 持仓名义价值  : {total_ntl:.4f} USDC")
+        print(f" 可提/可用金额 : {withdrawable:.4f} USDC")
+        if positions:
+            print(" 当前持仓:")
+            for coin, szi, entry, pnl in positions:
+                side = "LONG" if szi > 0 else "SHORT"
+                print(f"   {coin} | {side} | size={abs(szi)} | entry={entry} | uPnL={pnl}")
+        else:
+            print(" 当前持仓      : 无")
+
+    # HyperCore / first perp DEX account. This is separate from HIP-3 xyz.
+    core_state = post_info({
+        "type": "clearinghouseState",
+        "user": address,
+    })
+
+    # HIP-3 DEX used by this bot, e.g. xyz:XYZ100.
+    hip3_state = post_info({
+        "type": "clearinghouseState",
+        "user": address,
+        "dex": dex,
+    })
+
+    # Spot balances, including HYPE and spot USDC.
+    spot_state = post_info({
+        "type": "spotClearinghouseState",
+        "user": address,
+    })
+
+    spot_balances = []
+    for item in spot_state.get("balances", []):
+        total = safe_float(item.get("total"))
+        hold = safe_float(item.get("hold"))
+        if abs(total) > 1e-15 or abs(hold) > 1e-15:
+            spot_balances.append((str(item.get("coin", "?")), total, hold))
 
     print("\n" + "-" * 58)
-    print(f" Hyperliquid 资金查询 · DEX={dex}")
+    print(f" Hyperliquid 资金查询 · {masked_address(address)}")
     print("-" * 58)
-    print(f" 账户权益      : {account_value:.4f} USDC")
-    print(f" 已用保证金    : {margin_used:.4f} USDC")
-    print(f" 持仓名义价值  : {total_ntl:.4f} USDC")
-    print(f" 可提/可用金额 : {withdrawable:.4f} USDC")
-    if positions:
-        print(" 当前持仓:")
-        for coin, szi, entry, pnl in positions:
-            side = "LONG" if szi > 0 else "SHORT"
-            print(f"   {coin} | {side} | size={abs(szi)} | entry={entry} | uPnL={pnl}")
+    print_perp_state("HyperCore 永续账户", core_state)
+    print_perp_state(f"HIP-3 永续账户 · DEX={dex}", hip3_state)
+
+    print("\n Spot 现货余额")
+    if spot_balances:
+        # Put HYPE and USDC first for easier inspection.
+        spot_balances.sort(key=lambda x: (0 if x[0] == "HYPE" else 1 if x[0] == "USDC" else 2, x[0]))
+        for coin, total, hold in spot_balances:
+            available = max(0.0, total - hold)
+            print(f"   {coin:<10} total={total:.8f} | hold={hold:.8f} | available={available:.8f}")
     else:
-        print(" 当前持仓      : 无")
+        print("   无非零现货余额")
     print("-" * 58)
 
 
@@ -268,7 +301,7 @@ def main() -> None:
         print(" 4) 切换 DRY RUN / LIVE")
         print(" 5) 设置做多 / 做空方向")
         print(" 6) 刷新状态")
-        print(" 7) 查询资金 / 当前持仓")
+        print(" 7) 查询资金 / 当前持仓 / HYPE")
         print(" 0) 退出")
         choice = input("\n请选择: ").strip()
         try:
@@ -291,7 +324,7 @@ def main() -> None:
                 return
             else:
                 print("无效选项。")
-        except (ValueError, OSError, requests.RequestException) as exc:
+        except (ValueError, OSError, requests.RequestException, RuntimeError) as exc:
             print(f"操作失败：{exc}")
         input("\n按 Enter 返回菜单...")
 

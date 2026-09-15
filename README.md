@@ -131,6 +131,56 @@ OKX_PASSPHRASE=...
 
 This example is **OKX DEMO**, not live. Only `OKX_DEMO=false` together with `DRY_RUN=false` enables OKX production orders.
 
+## Herman Gateway v1 · mobile read-only dashboard
+
+The repository includes a separate **read-only** mobile dashboard. It does not modify the Herman strategy and it has no endpoint for opening/closing trades, changing leverage, changing TP/SL, or changing strategy parameters.
+
+It reads current account/position/protection data from the selected exchange and reads the bot's local runtime state file. Historical PnL uses exchange fill history:
+
+- Hyperliquid: `clearinghouseState`, `spotClearinghouseState`, `frontendOpenOrders`, `allMids`, and `userFillsByTime`
+- OKX: account balance/positions, pending algo protection, ticker, and `fills-history`
+
+The dashboard shows:
+
+- exchange / market / LIVE-DEMO-DRY RUN mode
+- account availability and selected balances
+- current LONG / SHORT position, entry, mark/last price, leverage and unrealized PnL
+- exchange-native TP / SL trigger orders
+- 24H / 7D / 30D realized PnL, fees, closing-fill win rate and Profit Factor
+- recent exchange fills
+- local bot state heartbeat and managed position state
+
+Run it in a second terminal:
+
+```bash
+cd ~/hyperliquid-herman-executor
+bash run_gateway.sh
+```
+
+Local-only defaults:
+
+```env
+GATEWAY_HOST=127.0.0.1
+GATEWAY_PORT=8787
+GATEWAY_TOKEN=
+```
+
+Then open `http://127.0.0.1:8787`.
+
+For a VPS, LAN or phone-accessible deployment, bind to all interfaces and set a strong token:
+
+```env
+GATEWAY_HOST=0.0.0.0
+GATEWAY_PORT=8787
+GATEWAY_TOKEN=replace-with-a-long-random-secret
+```
+
+When `GATEWAY_HOST` is not loopback, startup refuses to run unless `GATEWAY_TOKEN` is at least 16 characters. The browser sends this token only to the gateway API and stores it in that browser's local storage.
+
+**Do not expose port 8787 directly to the public internet over plain HTTP.** Put the gateway behind HTTPS (for example a reverse proxy, VPN/Tailscale, or Cloudflare Tunnel) and restrict firewall access where possible.
+
+The dashboard is intentionally independent of the trading process: stopping/restarting the web gateway does not stop the strategy bot, and a dashboard failure does not alter exchange orders.
+
 ## Railway deployment
 
 1. Put this folder in a GitHub repo.

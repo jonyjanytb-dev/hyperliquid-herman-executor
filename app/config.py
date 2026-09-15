@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from urllib.parse import urlparse
+
 from dotenv import load_dotenv
+
+
+DEFAULT_OKX_INST_ID = "US100-USDT-SWAP"
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -50,9 +55,24 @@ class Config:
     state_path: str
     log_level: str
 
+    exchange: str = "hyperliquid"
+    okx_inst_id: str = DEFAULT_OKX_INST_ID
+    okx_api_key: str = ""
+    okx_secret_key: str = ""
+    okx_passphrase: str = ""
+    okx_demo: bool = True
+    okx_margin_mode: str = "cross"
+    okx_trigger_price_type: str = "last"
+    okx_base_url: str = "https://www.okx.com"
+    request_timeout: float = 15.0
+    request_retry_attempts: int = 3
+    okx_fill_timeout: float = 10.0
+
     @classmethod
     def load(cls) -> "Config":
         load_dotenv()
+        exchange = os.getenv("EXCHANGE", "hyperliquid").strip().lower()
+        state_path = os.getenv("STATE_PATH", "").strip() or f"runtime/state-{exchange}.json"
         cfg = cls(
             dry_run=_bool("DRY_RUN", True),
             network=os.getenv("NETWORK", "mainnet").strip().lower(),
@@ -77,13 +97,30 @@ class Config:
             sl_fixed_points=_float("SL_FIXED_POINTS", 125.0),
             poll_seconds=_float("POLL_SECONDS", 3.0),
             lookback_candles=_int("LOOKBACK_CANDLES", 260),
-            state_path=os.getenv("STATE_PATH", "runtime/state.json").strip(),
+            state_path=state_path,
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
+            exchange=exchange,
+            okx_inst_id=(
+                os.getenv("OKX_INST_ID", DEFAULT_OKX_INST_ID).strip().upper()
+                or DEFAULT_OKX_INST_ID
+            ),
+            okx_api_key=os.getenv("OKX_API_KEY", "").strip(),
+            okx_secret_key=os.getenv("OKX_SECRET_KEY", "").strip(),
+            okx_passphrase=os.getenv("OKX_PASSPHRASE", "").strip(),
+            okx_demo=_bool("OKX_DEMO", True),
+            okx_margin_mode=os.getenv("OKX_MARGIN_MODE", "cross").strip().lower(),
+            okx_trigger_price_type=os.getenv("OKX_TRIGGER_PRICE_TYPE", "last").strip().lower(),
+            okx_base_url=os.getenv("OKX_BASE_URL", "https://www.okx.com").strip(),
+            request_timeout=_float("REQUEST_TIMEOUT", 15.0),
+            request_retry_attempts=_int("REQUEST_RETRY_ATTEMPTS", 3),
+            okx_fill_timeout=_float("OKX_FILL_TIMEOUT", 10.0),
         )
         cfg.validate()
         return cfg
 
     def validate(self) -> None:
+        if self.exchange not in {"hyperliquid", "okx"}:
+            raise ValueError("EXCHANGE must be hyperliquid or okx")
         if self.network not in {"mainnet", "testnet"}:
             raise ValueError("NETWORK must be mainnet or testnet")
         if self.interval != "1m":
@@ -94,13 +131,60 @@ class Config:
             raise ValueError("ORDER_NOTIONAL_USDC must be > 0")
         if self.max_slippage <= 0 or self.max_slippage > 0.05:
             raise ValueError("MAX_SLIPPAGE must be > 0 and <= 0.05")
+        if self.request_timeout <= 0:
+            raise ValueError("REQUEST_TIMEOUT must be > 0")
+        if self.request_retry_attempts < 1 or self.request_retry_attempts > 5:
+            raise ValueError("REQUEST_RETRY_ATTEMPTS must be between 1 and 5")
+        if self.okx_fill_timeout <= 0:
+            raise ValueError("OKX_FILL_TIMEOUT must be > 0")
         if self.tp_mode not in {"200 SMA", "Fixed Points"}:
             raise ValueError("TP_MODE must be '200 SMA' or 'Fixed Points'")
         if self.sma_target_behaviour not in {"Locked at Entry", "Dynamic"}:
             raise ValueError("SMA_TARGET_BEHAVIOUR invalid")
         if self.sl_mode not in {"1R to TP", "Fixed Points"}:
             raise ValueError("SL_MODE must be '1R to TP' or 'Fixed Points'")
-        if ":" not in self.coin or not self.coin.startswith(self.dex + ":"):
-            raise ValueError("COIN must use HIP-3 prefixed form, e.g. xyz:XYZ100")
-        if not self.dry_run and (not self.account_address or not self.api_private_key):
-            raise ValueError("ACCOUNT_ADDRESS and API_PRIVATE_KEY are required when DRY_RUN=false")
+        if self.exchange == "hyperliquid":
+            if ":" not in self.coin or not self.coin.startswith(self.dex + ":"):
+                raise ValueError("COIN must use HIP-3 prefixed form, e.g. xyz:XYZ100")
+            if not self.dry_run and (not self.account_address or not self.api_private_key):
+                raise ValueError("ACCOUNT_ADDRESS and API_PRIVATE_KEY are required when DRY_RUN=false")
+            return
+
+        if not self.okx_inst_id.endswith("-SWAP"):
+            raise ValueError("OKX_INST_ID must be a perpetual swap ending in -SWAP")
+        if self.okx_margin_mode not in {"cross", "isolated"}:
+            raise ValueError("OKX_MARGIN_MODE must be cross or isolated")
+        if self.okx_trigger_price_type not in {"last", "index", "mark"}:
+            raise ValueError("OKX_TRIGGER_PRICE_TYPE must be last, index or mark")
+        parsed_okx_url = urlparse(self.okx_base_url)
+        allowed_okx_hosts = {"www.okx.com", "my.okx.com", "app.okx.com"}
+        if (
+            parsed_okx_url.scheme != "https"
+            or parsed_okx_url.hostname not in allowed_okx_hosts
+            or parsed_okx_url.port not in {None, 443}
+            or parsed_okx_url.username is not None
+            or parsed_okx_url.password is not None
+            or parsed_okx_url.path not in {"", "/"}
+            or parsed_okx_url.query
+            or parsed_okx_url.fragment
+        ):
+            raise ValueError(
+                "OKX_BASE_URL must be an official OKX HTTPS origin: "
+                "https://www.okx.com, https://my.okx.com or https://app.okx.com"
+            )
+        if not self.dry_run and not all((self.okx_api_key, self.okx_secret_key, self.okx_passphrase)):
+            raise ValueError(
+                "OKX_API_KEY, OKX_SECRET_KEY and OKX_PASSPHRASE are required when DRY_RUN=false"
+            )
+
+    @property
+    def market_symbol(self) -> str:
+        return self.okx_inst_id if self.exchange == "okx" else self.coin
+
+    @property
+    def execution_mode(self) -> str:
+        if self.dry_run:
+            return "dry_run"
+        if self.exchange == "okx" and self.okx_demo:
+            return "demo"
+        return "live"

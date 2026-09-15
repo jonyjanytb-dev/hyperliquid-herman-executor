@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import requests
 
 from .models import Candle
+from .okx_client import OKXClient
 
 
 log = logging.getLogger(__name__)
@@ -137,4 +138,73 @@ class HyperliquidMarketData:
             self._last_success_minute = minute_bucket
             self._retry_after_ms = 0
 
+        return self._cache[-count:]
+
+
+class OKXMarketData:
+    """Fetch confirmed OKX one-minute candles and cache them per minute."""
+
+    def __init__(
+        self,
+        inst_id: str,
+        interval: str = "1m",
+        timeout: float = 15.0,
+        base_url: str = "https://www.okx.com",
+        retry_attempts: int = 3,
+        client: Optional[OKXClient] = None,
+        clock_ms: Optional[Callable[[], int]] = None,
+    ):
+        self.inst_id = inst_id
+        self.interval = interval
+        self.client = client or OKXClient(
+            base_url=base_url,
+            timeout=timeout,
+            retry_attempts=retry_attempts,
+        )
+        self._clock_ms = clock_ms or (lambda: int(time.time() * 1000))
+        self._cache: list[Candle] = []
+        self._last_success_minute: Optional[int] = None
+
+    def _request(self, limit: int) -> list[Candle]:
+        rows = self.client.get_public(
+            "/api/v5/market/candles",
+            {"instId": self.inst_id, "bar": self.interval, "limit": str(limit)},
+        )
+        candles = []
+        for row in rows:
+            if len(row) < 9 or str(row[8]) != "1":
+                continue
+            opened_at = int(row[0])
+            candles.append(
+                Candle(
+                    t=opened_at,
+                    T=opened_at + MINUTE_MS - 1,
+                    o=float(row[1]),
+                    h=float(row[2]),
+                    l=float(row[3]),
+                    c=float(row[4]),
+                    v=float(row[5]),
+                )
+            )
+        candles.sort(key=lambda candle: candle.t)
+        return candles
+
+    def fetch_recent(self, count: int = 260) -> list[Candle]:
+        now = self._clock_ms()
+        minute_bucket = now // MINUTE_MS
+        if self._cache and self._last_success_minute == minute_bucket:
+            return self._cache[-count:]
+
+        limit = min(300, count if not self._cache else max(10, min(count, 100)))
+        fresh = self._request(limit)
+        merged = {candle.t: candle for candle in self._cache}
+        for candle in fresh:
+            merged[candle.t] = candle
+        self._cache = sorted(merged.values(), key=lambda candle: candle.t)[-count:]
+        # Immediately after a minute boundary OKX may still return the newest
+        # candle with confirm=0. Do not cache that incomplete response for the
+        # whole minute; retry on the next poll until the just-closed bar arrives.
+        expected_latest_open = (minute_bucket - 1) * MINUTE_MS
+        if self._cache and self._cache[-1].t >= expected_latest_open:
+            self._last_success_minute = minute_bucket
         return self._cache[-count:]

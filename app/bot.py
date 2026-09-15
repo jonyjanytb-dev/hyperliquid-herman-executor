@@ -8,8 +8,8 @@ from statistics import fmean
 from typing import Optional
 
 from .config import Config
-from .executor import BaseExecutor, DryRunExecutor, HyperliquidExecutor
-from .market_data import HyperliquidMarketData
+from .executor import BaseExecutor, DryRunExecutor, HyperliquidExecutor, OKXExecutor
+from .market_data import HyperliquidMarketData, OKXMarketData
 from .models import RuntimeState
 from .state import StateStore
 from .strategy import HermanTrendRebalanceStrategy
@@ -17,14 +17,39 @@ from .strategy import HermanTrendRebalanceStrategy
 log = logging.getLogger(__name__)
 
 
+def build_market_data(cfg: Config):
+    if cfg.exchange == "okx":
+        return OKXMarketData(
+            cfg.okx_inst_id,
+            cfg.interval,
+            timeout=cfg.request_timeout,
+            base_url=cfg.okx_base_url,
+            retry_attempts=cfg.request_retry_attempts,
+        )
+    return HyperliquidMarketData(
+        cfg.network,
+        cfg.coin,
+        cfg.interval,
+        timeout=cfg.request_timeout,
+    )
+
+
+def build_executor(cfg: Config) -> BaseExecutor:
+    if cfg.dry_run:
+        return DryRunExecutor(cfg)
+    if cfg.exchange == "okx":
+        return OKXExecutor(cfg)
+    return HyperliquidExecutor(cfg)
+
+
 class TradingBot:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.market = HyperliquidMarketData(cfg.network, cfg.coin, cfg.interval)
+        self.market = build_market_data(cfg)
         self.strategy = HermanTrendRebalanceStrategy(cfg)
         self.store = StateStore(cfg.state_path)
         self.state = self.store.load()
-        self.executor: BaseExecutor = DryRunExecutor(cfg) if cfg.dry_run else HyperliquidExecutor(cfg)
+        self.executor = build_executor(cfg)
         self.running = True
 
     def stop(self, *_):
@@ -106,8 +131,9 @@ class TradingBot:
 
         if len(closes) < self.cfg.sma200_length:
             log.info(
-                "[%s] XYZ100=%.2f | SMA warmup %s/%s | 等待数据",
+                "[%s] %s=%.2f | SMA warmup %s/%s | 等待数据",
                 bar_time,
+                self.cfg.market_symbol,
                 bar.c,
                 len(closes),
                 self.cfg.sma200_length,
@@ -128,8 +154,9 @@ class TradingBot:
             status = "等待信号"
 
         log.info(
-            "[%s] XYZ100=%.2f | SMA50=%.2f | SMA200=%.2f | Sep=%.2f | %s",
+            "[%s] %s=%.2f | SMA50=%.2f | SMA200=%.2f | Sep=%.2f | %s",
             bar_time,
+            self.cfg.market_symbol,
             bar.c,
             sma50,
             sma200,
@@ -203,8 +230,10 @@ class TradingBot:
         signal.signal(signal.SIGTERM, self.stop)
         signal.signal(signal.SIGINT, self.stop)
         log.info(
-            "Starting Herman executor: network=%s coin=%s dry_run=%s",
-            self.cfg.network, self.cfg.coin, self.cfg.dry_run,
+            "Starting Herman executor: exchange=%s market=%s mode=%s",
+            self.cfg.exchange,
+            self.cfg.market_symbol,
+            self.cfg.execution_mode,
         )
         failures = 0
         while self.running:

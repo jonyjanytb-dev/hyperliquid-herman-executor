@@ -1,6 +1,8 @@
 .env
+.venv/
 __pycache__/
 *.pyc
 .pytest_cache/
+.learnings/
 runtime/*.json
 .DS_Store

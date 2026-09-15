@@ -10,6 +10,9 @@ from pathlib import Path
 import requests
 from dotenv import dotenv_values
 
+from app.config import DEFAULT_OKX_INST_ID
+from app.okx_client import OKXClient
+
 ROOT = Path(__file__).resolve().parent
 ENV_PATH = ROOT / ".env"
 ENV_EXAMPLE = ROOT / ".env.example"
@@ -27,6 +30,40 @@ def read_env() -> dict[str, str]:
     ensure_env()
     raw = dotenv_values(ENV_PATH)
     return {k: str(v or "") for k, v in raw.items()}
+
+
+def selected_exchange(cfg: dict[str, str]) -> str:
+    return cfg.get("EXCHANGE", "hyperliquid").strip().lower() or "hyperliquid"
+
+
+def execution_mode(cfg: dict[str, str]) -> str:
+    if cfg.get("DRY_RUN", "true").strip().lower() == "true":
+        return "dry_run"
+    if selected_exchange(cfg) == "okx" and cfg.get("OKX_DEMO", "true").strip().lower() == "true":
+        return "demo"
+    return "live"
+
+
+def market_symbol(cfg: dict[str, str]) -> str:
+    if selected_exchange(cfg) == "okx":
+        return cfg.get("OKX_INST_ID", DEFAULT_OKX_INST_ID).strip().upper() or DEFAULT_OKX_INST_ID
+    return cfg.get("COIN", "xyz:XYZ100").strip()
+
+
+def quote_currency(cfg: dict[str, str]) -> str:
+    if selected_exchange(cfg) != "okx":
+        return "USDC"
+    parts = market_symbol(cfg).split("-")
+    return parts[-2] if len(parts) >= 3 else "USDT/USDC"
+
+
+def credentials_ready(cfg: dict[str, str]) -> bool:
+    if selected_exchange(cfg) == "okx":
+        return all(
+            cfg.get(key, "").strip()
+            for key in ("OKX_API_KEY", "OKX_SECRET_KEY", "OKX_PASSPHRASE")
+        )
+    return bool(cfg.get("ACCOUNT_ADDRESS", "").strip() and cfg.get("API_PRIVATE_KEY", "").strip())
 
 
 def set_env(key: str, value: str) -> None:
@@ -60,27 +97,39 @@ def masked_address(value: str) -> str:
 
 def show_status() -> None:
     cfg = read_env()
-    dry_run = cfg.get("DRY_RUN", "true").lower() == "true"
+    exchange = selected_exchange(cfg)
+    mode = execution_mode(cfg)
     notional = float(cfg.get("ORDER_NOTIONAL_USDC", "100") or 100)
     leverage = int(cfg.get("LEVERAGE", "0") or 0)
+    currency = quote_currency(cfg)
     if leverage > 0:
-        margin = f"约 {notional / leverage:.2f} USDC"
+        margin = f"约 {notional / leverage:.2f} {currency}"
         lev_text = f"{leverage}x"
     else:
         margin = "由账户当前杠杆决定"
         lev_text = "不自动修改"
 
     print("\n" + "=" * 58)
-    print(" Hyperliquid Herman Executor · 本地交互终端")
+    print(" Herman Executor · Hyperliquid / OKX 本地交互终端")
     print("=" * 58)
-    print(f" 模式        : {'DRY RUN（模拟，不下真钱）' if dry_run else 'LIVE（真实下单）'}")
-    print(f" 市场        : {cfg.get('COIN', 'xyz:XYZ100')}")
+    mode_text = {
+        "dry_run": "DRY RUN（本地空跑，不发送订单）",
+        "demo": "OKX DEMO（交易所模拟盘）",
+        "live": "LIVE（真实下单）",
+    }[mode]
+    print(f" 交易所      : {'OKX' if exchange == 'okx' else 'Hyperliquid'}")
+    print(f" 模式        : {mode_text}")
+    print(f" 市场        : {market_symbol(cfg) or '未设置'}")
     print(f" 周期        : {cfg.get('INTERVAL', '1m')}")
-    print(f" 每笔名义仓位: {notional:.2f} USDC")
+    print(f" 每笔名义仓位: {notional:.2f} {currency}")
     print(f" 杠杆        : {lev_text}")
     print(f" 预计保证金  : {margin}")
-    print(f" 主账户      : {masked_address(cfg.get('ACCOUNT_ADDRESS', ''))}")
-    print(f" API Wallet  : {'已设置' if cfg.get('API_PRIVATE_KEY') else '未设置'}")
+    if exchange == "okx":
+        print(f" 保证金模式  : {cfg.get('OKX_MARGIN_MODE', 'cross')}")
+        print(f" OKX API     : {'已设置' if credentials_ready(cfg) else '未设置'}")
+    else:
+        print(f" 主账户      : {masked_address(cfg.get('ACCOUNT_ADDRESS', ''))}")
+        print(f" API Wallet  : {'已设置' if cfg.get('API_PRIVATE_KEY') else '未设置'}")
     print(f" 做多        : {yn(cfg.get('ENABLE_LONGS', 'true'))}")
     print(f" 做空        : {yn(cfg.get('ENABLE_SHORTS', 'true'))}")
     print(f" TP          : {cfg.get('TP_MODE', '200 SMA')} / {cfg.get('SMA_TARGET_BEHAVIOUR', 'Dynamic')}")
@@ -112,8 +161,9 @@ def configure_position() -> None:
     cfg = read_env()
     notional = float(cfg.get("ORDER_NOTIONAL_USDC", "100") or 100)
     leverage = int(cfg.get("LEVERAGE", "0") or 0)
+    currency = quote_currency(cfg)
     print("\n说明：名义仓位=实际合约持仓价值。例：250U仓位 + 5x ≈ 50U保证金。")
-    notional = ask_float("每笔名义仓位 USDC", notional)
+    notional = ask_float(f"每笔名义仓位 {currency}", notional)
     leverage = ask_int("杠杆（0=不自动修改账户杠杆）", leverage, 0)
     set_env("ORDER_NOTIONAL_USDC", str(notional))
     set_env("LEVERAGE", str(leverage))
@@ -122,6 +172,57 @@ def configure_position() -> None:
 
 def configure_credentials() -> None:
     cfg = read_env()
+    current_exchange = selected_exchange(cfg)
+    print(f"\n当前交易所：{'OKX' if current_exchange == 'okx' else 'Hyperliquid'}")
+    choice = input("选择交易所 [1=Hyperliquid, 2=OKX, Enter=保持]: ").strip()
+    exchange = {"1": "hyperliquid", "2": "okx"}.get(choice, current_exchange)
+    if choice not in {"", "1", "2"}:
+        raise ValueError("交易所选项只能是 1 或 2")
+    if exchange != current_exchange:
+        set_env("EXCHANGE", exchange)
+        # Never inherit another exchange's live/demo state while changing
+        # account credentials or instrument configuration.
+        set_env("DRY_RUN", "true")
+        current_state_path = cfg.get("STATE_PATH", "").strip()
+        default_paths = {"", "runtime/state.json", "runtime/state-hyperliquid.json", "runtime/state-okx.json"}
+        if current_state_path in default_paths:
+            set_env("STATE_PATH", f"runtime/state-{exchange}.json")
+        cfg = read_env()
+
+    if exchange == "okx":
+        current_inst = cfg.get("OKX_INST_ID", DEFAULT_OKX_INST_ID).strip().upper() or DEFAULT_OKX_INST_ID
+        prompt = f"OKX 永续合约 ID [{current_inst}]: " if current_inst else "OKX 永续合约 ID（例如 BTC-USDT-SWAP）: "
+        inst_id = input(prompt).strip().upper() or current_inst
+        if not inst_id.endswith("-SWAP"):
+            raise ValueError("目前只支持 OKX 永续合约，ID 必须以 -SWAP 结尾")
+        set_env("OKX_INST_ID", inst_id)
+
+        margin_mode = input(
+            f"保证金模式 cross/isolated [{cfg.get('OKX_MARGIN_MODE', 'cross') or 'cross'}]: "
+        ).strip().lower() or cfg.get("OKX_MARGIN_MODE", "cross").strip().lower() or "cross"
+        if margin_mode not in {"cross", "isolated"}:
+            raise ValueError("保证金模式只能是 cross 或 isolated")
+        set_env("OKX_MARGIN_MODE", margin_mode)
+
+        site = input("OKX 站点 [1=Global, 2=EEA, 3=US, Enter=保持]: ").strip()
+        if site:
+            urls = {"1": "https://www.okx.com", "2": "https://my.okx.com", "3": "https://app.okx.com"}
+            if site not in urls:
+                raise ValueError("站点选项只能是 1、2 或 3")
+            set_env("OKX_BASE_URL", urls[site])
+
+        print("请输入只具备 Read/Trade 权限、禁止 Withdraw 的 OKX API 凭证；终端不会显示字符。")
+        for key, label in (
+            ("OKX_API_KEY", "OKX API Key"),
+            ("OKX_SECRET_KEY", "OKX Secret Key"),
+            ("OKX_PASSPHRASE", "OKX Passphrase"),
+        ):
+            secret = getpass.getpass(f"{label}（留空保持原值）: ").strip()
+            if secret:
+                set_env(key, secret)
+        print("OKX 配置已保存到本机 .env，不会上传 GitHub。建议先使用 OKX DEMO。")
+        return
+
     current = cfg.get("ACCOUNT_ADDRESS", "")
     prompt = f"主 Hyperliquid 账户地址 [{masked_address(current)}]: " if current else "主 Hyperliquid 账户地址 (0x...): "
     address = input(prompt).strip()
@@ -139,8 +240,55 @@ def configure_credentials() -> None:
     print("凭证只写入本机 .env，.gitignore 会阻止它上传 GitHub。")
 
 
+def query_okx_funds(cfg: dict[str, str]) -> None:
+    if not credentials_ready(cfg):
+        print("请先在 3) 设置完整的 OKX API Key、Secret Key 和 Passphrase。")
+        return
+    client = OKXClient(
+        base_url=cfg.get("OKX_BASE_URL", "https://www.okx.com") or "https://www.okx.com",
+        api_key=cfg.get("OKX_API_KEY", ""),
+        secret_key=cfg.get("OKX_SECRET_KEY", ""),
+        passphrase=cfg.get("OKX_PASSPHRASE", ""),
+        demo=cfg.get("OKX_DEMO", "true").lower() == "true",
+        timeout=float(cfg.get("REQUEST_TIMEOUT", "15") or 15),
+        retry_attempts=int(cfg.get("REQUEST_RETRY_ATTEMPTS", "3") or 3),
+    )
+    balances = client.get_private("/api/v5/account/balance")
+    positions = client.get_private(
+        "/api/v5/account/positions",
+        {"instId": market_symbol(cfg)},
+    )
+    account = balances[0] if balances else {}
+    currency = quote_currency(cfg)
+    detail = next((item for item in account.get("details", []) if item.get("ccy") == currency), {})
+
+    print("\n" + "-" * 58)
+    print(f" OKX 资金查询 · {execution_mode(cfg).upper()}")
+    print("-" * 58)
+    print(f" 账户总权益    : {account.get('totalEq', '0')} USD")
+    print(f" {currency} 权益     : {detail.get('eq', detail.get('cashBal', '0'))} {currency}")
+    print(f" {currency} 可用     : {detail.get('availEq', detail.get('availBal', '0'))} {currency}")
+    active = [row for row in positions if abs(float(row.get("pos") or 0)) > 0]
+    if active:
+        print(" 当前持仓:")
+        for row in active:
+            pos = float(row.get("pos") or 0)
+            pos_side = row.get("posSide", "net")
+            side = "SHORT" if pos_side == "short" or (pos_side == "net" and pos < 0) else "LONG"
+            print(
+                f"   {row.get('instId')} | {side} | contracts={abs(pos)} | "
+                f"entry={row.get('avgPx')} | uPnL={row.get('upl')}"
+            )
+    else:
+        print(" 当前持仓      : 无")
+    print("-" * 58)
+
+
 def query_funds() -> None:
     cfg = read_env()
+    if selected_exchange(cfg) == "okx":
+        query_okx_funds(cfg)
+        return
     address = cfg.get("ACCOUNT_ADDRESS", "").strip()
     if not address:
         print("请先在 3) 设置 Hyperliquid 主账户地址。")
@@ -239,6 +387,36 @@ def query_funds() -> None:
 
 def switch_mode() -> None:
     cfg = read_env()
+    if selected_exchange(cfg) == "okx":
+        print("\n选择运行模式：")
+        print(" 1) DRY RUN（本地空跑，不发送任何订单）")
+        print(" 2) OKX DEMO（交易所模拟盘，会发送模拟订单）")
+        print(" 3) LIVE（OKX 实盘，真实资金）")
+        choice = input("请选择 [1/2/3]: ").strip()
+        if choice == "1":
+            set_env("DRY_RUN", "true")
+            print("已切换为 DRY RUN。")
+            return
+        if choice not in {"2", "3"}:
+            print("已取消。")
+            return
+        latest = read_env()
+        if not credentials_ready(latest):
+            print("无法切换：请先设置完整的 OKX API 凭证。")
+            return
+        if choice == "3":
+            if input("即将启用 OKX 真实交易。如确认，请输入 LIVE: ").strip() != "LIVE":
+                print("已取消。")
+                return
+            set_env("OKX_DEMO", "false")
+            set_env("DRY_RUN", "false")
+            print("已切换为 OKX LIVE。")
+            return
+        set_env("OKX_DEMO", "true")
+        set_env("DRY_RUN", "false")
+        print("已切换为 OKX DEMO 模拟盘。")
+        return
+
     dry_run = cfg.get("DRY_RUN", "true").lower() == "true"
     if dry_run:
         print("\n你正在从 DRY RUN 切换到真实交易。")
@@ -271,12 +449,13 @@ def configure_direction() -> None:
 
 def start_bot() -> None:
     cfg = read_env()
-    dry_run = cfg.get("DRY_RUN", "true").lower() == "true"
-    if not dry_run:
-        if not cfg.get("ACCOUNT_ADDRESS") or not cfg.get("API_PRIVATE_KEY"):
-            print("LIVE 模式缺少账户/API Wallet 凭证，拒绝启动。")
+    mode = execution_mode(cfg)
+    if mode != "dry_run":
+        if not credentials_ready(cfg):
+            print("当前模式缺少完整交易凭证，拒绝启动。")
             return
-        print("\n即将启动 LIVE 自动交易。按 Ctrl+C 可停止机器人并返回菜单。")
+        mode_name = "OKX DEMO 模拟交易" if mode == "demo" else "LIVE 自动交易"
+        print(f"\n即将启动 {mode_name}。按 Ctrl+C 可停止机器人并返回菜单。")
         if input("输入 START 确认: ").strip() != "START":
             print("已取消。")
             return
@@ -297,8 +476,8 @@ def main() -> None:
         show_status()
         print(" 1) 启动机器人")
         print(" 2) 设置每笔仓位 / 杠杆")
-        print(" 3) 设置 Hyperliquid 账户 / API Wallet")
-        print(" 4) 切换 DRY RUN / LIVE")
+        print(" 3) 设置交易所 / API 凭证")
+        print(" 4) 切换 DRY RUN / DEMO / LIVE")
         print(" 5) 设置做多 / 做空方向")
         print(" 6) 刷新状态")
         print(" 7) 查询资金 / 当前持仓 / HYPE")
@@ -324,7 +503,7 @@ def main() -> None:
                 return
             else:
                 print("无效选项。")
-        except (ValueError, OSError, requests.RequestException, RuntimeError) as exc:
+        except (ValueError, RuntimeError, OSError, requests.RequestException) as exc:
             print(f"操作失败：{exc}")
         input("\n按 Enter 返回菜单...")
 

@@ -1,10 +1,10 @@
-# Hyperliquid Herman Executor
+# Herman Executor · Hyperliquid / OKX
 
-Cloud/local executor for **Trend Rebalance Map [Herman] v1.1** on Hyperliquid HIP-3 `xyz:XYZ100` using 1-minute closed candles.
+Cloud/local executor for **Trend Rebalance Map [Herman] v1.1**. It supports Hyperliquid HIP-3 and OKX linear USDT/USDC perpetual swaps using one-minute closed candles.
 
 ## Architecture
 
-`Hyperliquid XYZ100 1m candles -> Pine logic translated 1:1 -> Hyperliquid official Python SDK -> entry + native TP/SL`
+`Selected exchange 1m candles -> Pine logic translated 1:1 -> exchange adapter -> entry + exchange-native TP/SL`
 
 No TradingView subscription or webhook is required.
 
@@ -26,7 +26,7 @@ The original Pine source is included under `reference/`.
 
 ## Safety default
 
-`DRY_RUN=true` is the default. The program will not place live orders until you explicitly set `DRY_RUN=false` and provide credentials.
+`DRY_RUN=true` and `EXCHANGE=hyperliquid` remain the defaults. Upgrading does not switch exchanges or place orders. OKX also has a separate DEMO mode that sends orders only to OKX simulated trading.
 
 ## Local interactive terminal (recommended)
 
@@ -43,11 +43,13 @@ bash run_local.sh
 The terminal can:
 
 - start/stop the bot in the foreground
-- show current mode, market, position notional, leverage and estimated margin
+- select Hyperliquid or OKX and show the active exchange, mode and market
+- show position notional, leverage and estimated margin
 - edit `ORDER_NOTIONAL_USDC` and `LEVERAGE`
-- enter the Hyperliquid main account and API Wallet private key locally (private-key input is hidden)
-- switch between DRY RUN and LIVE with an explicit confirmation
+- enter Hyperliquid or OKX credentials locally (secret input is hidden)
+- switch between DRY RUN, OKX DEMO and LIVE with explicit confirmation
 - enable/disable long or short execution
+- query the selected exchange's balance and current position
 
 The local `.env` is ignored by Git and should never be committed.
 
@@ -80,7 +82,27 @@ Do not use a withdrawal-capable secret in the bot.
 
 For HIP-3 the SDK is initialized with `perp_dexs=["xyz"]` and the coin is `xyz:XYZ100`.
 
-## Switch to live trading
+## OKX configuration
+
+The first OKX release supports linear USDT/USDC perpetual swaps (`*-SWAP`). The bot checks the selected instrument's live status and reads `ctVal`, `lotSz`, `minSz` and `tickSz` before trading, so quote-currency notional is converted into valid contract quantities and prices.
+
+The configured OKX counterpart for this strategy is the USDT-settled US100 Index Perpetual, `US100-USDT-SWAP`. OKX product availability is region-dependent; startup stops safely if the selected account/site cannot access the instrument.
+
+Recommended local setup:
+
+1. Run `bash run_local.sh`.
+2. Choose `3) 设置交易所 / API 凭证`, then select OKX. This strategy defaults to the US100 perpetual instrument ID `US100-USDT-SWAP`.
+3. Use an API key with **Read + Trade** permissions only. Do not grant **Withdraw** permission. Bind the key to your IP where practical.
+4. Choose `4) 切换 DRY RUN / DEMO / LIVE` and test in **OKX DEMO** first.
+5. Query funds/positions, then start the bot and inspect its logs before considering LIVE.
+
+The terminal supports the Global (`www.okx.com`), EEA (`my.okx.com`) and US (`app.okx.com`) OKX origins. API key, secret and passphrase stay in the ignored local `.env` file.
+
+For OKX positions, initial TP and SL are submitted together as an exchange-native OCO algo order. In Dynamic 200-SMA mode, the TP trigger is amended in place after each confirmed closed candle; `cxlOnFail=false` keeps the previous TP and SL working if an amendment fails. After restart, the bot retrieves pending conditional/OCO protection before managing an existing position.
+
+OKX spot, dated futures, options, inverse swaps and simultaneous long+short positions on the same instrument are intentionally not supported in this release.
+
+## Switch to Hyperliquid live trading
 
 After dry-run logs look correct:
 
@@ -94,6 +116,21 @@ API_PRIVATE_KEY=0x...
 ORDER_NOTIONAL_USDC=100
 ```
 
+For OKX, use the interactive terminal so DEMO and LIVE cannot be confused. The equivalent configuration is:
+
+```env
+EXCHANGE=okx
+OKX_INST_ID=US100-USDT-SWAP
+OKX_MARGIN_MODE=cross
+OKX_DEMO=true
+DRY_RUN=false
+OKX_API_KEY=...
+OKX_SECRET_KEY=...
+OKX_PASSPHRASE=...
+```
+
+This example is **OKX DEMO**, not live. Only `OKX_DEMO=false` together with `DRY_RUN=false` enables OKX production orders.
+
 ## Railway deployment
 
 1. Put this folder in a GitHub repo.
@@ -102,7 +139,7 @@ ORDER_NOTIONAL_USDC=100
 4. Deploy. `railway.toml` and `Dockerfile` are included.
 5. Keep `DRY_RUN=true` for the first deployment; only switch it off after checking logs.
 
-If you want state to persist across container replacement, attach a Railway volume and set `STATE_PATH` to a path on that volume (for example `/data/state.json`). The bot also attempts to recover an existing live position and its trigger orders from Hyperliquid after a restart.
+If you want state to persist across container replacement, attach a Railway volume and set `STATE_PATH` to a path on that volume (for example `/data/state-okx.json`). When `STATE_PATH` is blank, the bot uses a separate local state file for each exchange. The bot also attempts to recover an existing position and its exchange-native protection after a restart.
 
 ## Notes on execution parity
 

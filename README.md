@@ -25,6 +25,22 @@
 - **Herman Gateway v1**：手机/浏览器只读监控资金、持仓、TP/SL、成交和收益分析
 - DRY RUN / OKX DEMO / LIVE 三种运行方式
 
+## 界面预览
+
+本项目提供两套互补的使用界面：一套用于本地执行与配置，一套用于手机 / 浏览器只读监控。
+
+### 1. 本地终端交互页面
+
+用于在本机或 VPS 上直接管理策略运行状态，支持启动机器人、设置每笔仓位与杠杆、配置 Hyperliquid / OKX API 凭证、切换 DRY RUN / DEMO / LIVE、设置做多/做空方向，以及查询资金和当前持仓。
+
+![Herman Executor 本地终端交互页面](docs/images/terminal-console.jpg)
+
+### 2. 手机 / Web Gateway
+
+用于手机或浏览器实时查看策略运行情况。可查看账户资金、当前持仓、交易所原生 Dynamic TP / Stop Loss、最近成交、未实现 PnL，以及 24H / 7D / 30D 收益、胜率、Profit Factor、手续费和平均盈亏等统计数据。
+
+![Herman Gateway 手机 / Web 监控面板](docs/images/web-gateway.jpg)
+
 ### 策略来源与致谢
 
 策略原作者：**HermanTrading / @RHerman**。
